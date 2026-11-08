@@ -27,9 +27,13 @@ An automated load testing and benchmarking suite using k6 to evaluate concurrenc
 
 ## Running Benchmarks
 
-### Prerequisites
-- Docker & Docker Compose
-- Either native `k6` CLI or Docker (the script automatically invokes `grafana/k6` in a container if `k6` is not in `PATH`).
+### Architecture & Network Topology
+- **In-Network Execution**: `k6` is executed inside the Docker Compose network using the dedicated `k6` service (`profiles: ["bench"]`), targeting `http://app:8080` directly.
+- **Why In-Network**: Running load generators against `localhost:8080` on macOS routes traffic through Docker Desktop's port-forwarding NAT proxy, which can encounter TCP connection reset issues (`read: connection reset by peer`) under sustained high-concurrency traffic (50+ VUs). Running k6 directly inside the container bridge network eliminates the host NAT bottleneck and guarantees clean, consistent measurements.
+- **Hardware & Docker Limits**:
+  - Host CPU: Apple M1 (8 cores) / 8 GB RAM
+  - Docker Desktop VM: 8 CPUs, 4.0 GB memory limit
+  - Single-node PostgreSQL 16 container with Hikari connection pool (size 20)
 
 ### Execution
 Run all strategies and scenarios with default settings:
