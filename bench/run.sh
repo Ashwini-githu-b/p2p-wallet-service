@@ -111,14 +111,13 @@ for strategy in "${STRATEGIES[@]}"; do
     run_k6 "$strategy" "$scenario"
 
     echo "Running post-scenario reconciliation..."
-    recon_res
     recon_res="$(curl -s -X POST "$BASE_URL/api/v1/admin/reconciliation/run" \
       -H "X-Admin-Token: $ADMIN_TOKEN" \
       -H "Content-Type: application/json")"
 
     echo "$recon_res" > "$RESULTS_DIR/${strategy}-${scenario}-recon.json"
 
-    local recon_status
+    recon_status
     recon_status="$(echo "$recon_res" | grep -o '"status":"[^"]*"' | cut -d':' -f2 | tr -d '"' || true)"
 
     if [ "$recon_status" != "OK" ]; then
