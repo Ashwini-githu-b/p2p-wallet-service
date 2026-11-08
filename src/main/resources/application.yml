@@ -22,7 +22,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
+  metrics:
+    tags:
+      application: wallet-service
+    distribution:
+      percentiles-histogram:
+        wallet.operation.duration: true
 
 wallet:
   max-amount-paise: 10000000   # Rs 1,00,000 per operation
@@ -37,3 +43,7 @@ wallet:
     enabled: true
     interval-ms: 300000
     initial-delay-ms: 30000
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

@@ -36,6 +36,11 @@ public class AtomicUpdateStrategy extends AbstractTransferStrategy {
     }
 
     @Override
+    public String name() {
+        return "ATOMIC_UPDATE";
+    }
+
+    @Override
     public OperationResult execute(MoneyMovement m) {
         Instant now = Instant.now();
         Timestamp nowTs = Timestamp.from(now);

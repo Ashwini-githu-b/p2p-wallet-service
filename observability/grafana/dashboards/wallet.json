@@ -1,0 +1,141 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Throughput (transfers/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(wallet_operations_total{type=\"TRANSFER\",outcome=\"success\"}[30s]))",
+          "legendFormat": "Throughput",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(wallet_operation_duration_seconds_bucket{type=\"TRANSFER\"}[1m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wallet_operation_duration_seconds_bucket{type=\"TRANSFER\"}[1m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(wallet_operation_duration_seconds_bucket{type=\"TRANSFER\"}[1m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Outcomes",
+      "type": "timeseries",
+      "fieldConfig": {
+        "custom": {
+          "stacking": {
+            "mode": "normal"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(wallet_operations_total[30s]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Retries/s",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(wallet_retries_total[30s]))",
+          "legendFormat": "Retries/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "DB Pool",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "hikaricp_connections_active",
+          "legendFormat": "active",
+          "refId": "A"
+        },
+        {
+          "expr": "hikaricp_connections_pending",
+          "legendFormat": "pending",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "title": "Ledger Health",
+      "type": "stat",
+      "fieldConfig": {
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "wallet_reconciliation_discrepancies",
+          "legendFormat": "Discrepancies",
+          "refId": "A"
+        },
+        {
+          "expr": "time() - wallet_reconciliation_last_run_timestamp",
+          "legendFormat": "Seconds since last run",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["wallet"],
+  "timezone": "browser",
+  "title": "Wallet Service",
+  "uid": "wallet-service",
+  "version": 1
+}
+

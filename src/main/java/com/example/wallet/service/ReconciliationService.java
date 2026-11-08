@@ -19,10 +19,15 @@ public class ReconciliationService {
 
     private final LedgerAuditor ledgerAuditor;
     private final ReconciliationRunRepository runRepository;
+    private final com.example.wallet.metrics.WalletMetrics walletMetrics;
 
-    public ReconciliationService(LedgerAuditor ledgerAuditor, ReconciliationRunRepository runRepository) {
+    public ReconciliationService(
+            LedgerAuditor ledgerAuditor,
+            ReconciliationRunRepository runRepository,
+            com.example.wallet.metrics.WalletMetrics walletMetrics) {
         this.ledgerAuditor = ledgerAuditor;
         this.runRepository = runRepository;
+        this.walletMetrics = walletMetrics;
     }
 
     public Optional<ReconciliationRun> runOnce() {
@@ -55,6 +60,7 @@ public class ReconciliationService {
         );
 
         run = runRepository.save(run);
+        walletMetrics.recordReconciliation(discrepancyCount, finishedAt.getEpochSecond());
 
         if ("OK".equals(status)) {
             log.info("Reconciliation run OK: checked {} wallets, {} transactions. Zero discrepancies.",

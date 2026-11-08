@@ -12,5 +12,10 @@ class OptimisticStrategyTest extends StrategyContractTest {
     boolean conflictsPossible() {
         return true;
     }
+
+    @Override
+    String strategyName() {
+        return "OPTIMISTIC";
+    }
 }
 

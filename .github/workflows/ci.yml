@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+      - name: Run Maven Verify
+        run: mvn -B -ntp verify
+
+  frontend:
+    name: Frontend Tests and Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run Frontend Tests
+        working-directory: frontend
+        run: npm test -- --run
+      - name: Build Frontend
+        working-directory: frontend
+        run: npm run build
+
+  docker:
+    name: Docker Production Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Production Image
+        run: docker build -f Dockerfile.prod -t wallet-service:ci .
+

@@ -12,5 +12,10 @@ class AtomicUpdateStrategyTest extends StrategyContractTest {
     boolean conflictsPossible() {
         return false;
     }
+
+    @Override
+    String strategyName() {
+        return "ATOMIC_UPDATE";
+    }
 }
 

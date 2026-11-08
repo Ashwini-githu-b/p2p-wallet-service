@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useDirectory } from '../state/DirectoryContext';
 import { apiFetch } from '../api/client';
-import { WalletResponse, TransactionResponse } from '../api/types';
+import { WalletResponse, TransactionResponse, ReconciliationResponse } from '../api/types';
 import { parseRupeesToPaise, formatPaise, isValidPaise } from '../lib/money';
 import { formatShortId } from '../lib/format';
 import { Field } from '../components/Field';
@@ -48,6 +48,26 @@ export const LabPage: React.FC = () => {
   const [running, setRunning] = useState(false);
   const [concurrentResults, setConcurrentResults] = useState<ConcurrentResults | null>(null);
   const [replayResults, setReplayResults] = useState<ReplayResults | null>(null);
+
+  const [reconRun, setReconRun] = useState<ReconciliationResponse | null>(null);
+  const [reconLoading, setReconLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    let mounted = true;
+    apiFetch<ReconciliationResponse>('/api/v1/admin/reconciliation/latest', { skipLog: true })
+      .then(res => {
+        if (mounted && res.status === 200 && res.data) {
+          setReconRun(res.data);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (mounted) setReconLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Initialize sender & receiver once accounts are loaded
   useEffect(() => {
@@ -243,22 +263,106 @@ export const LabPage: React.FC = () => {
     }
   };
 
+  const renderLedgerHealthPanel = () => {
+    return (
+      <div className="panel" style={{ marginBottom: '24px' }}>
+        <h2 className="panel-title">Ledger health</h2>
+        {reconLoading ? (
+          <p className="text-ink-2">Loading…</p>
+        ) : !reconRun ? (
+          <p className="text-ink-2">Not checked yet.</p>
+        ) : (
+          <div>
+            <table className="ledger-table" style={{ marginBottom: reconRun.discrepancies.length > 0 ? '16px' : '0' }}>
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Status</td>
+                  <td className={reconRun.status === 'OK' ? 'text-credit' : 'text-debit'}>
+                    <strong>{reconRun.status}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Checked at</td>
+                  <td className="mono">{new Date(reconRun.finishedAt || reconRun.startedAt).toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td>Wallets checked</td>
+                  <td className="mono">{reconRun.walletsChecked}</td>
+                </tr>
+                <tr>
+                  <td>Transactions checked</td>
+                  <td className="mono">{reconRun.transactionsChecked}</td>
+                </tr>
+                <tr>
+                  <td>Discrepancies</td>
+                  <td className={`mono ${reconRun.discrepancyCount > 0 ? 'text-debit' : 'text-credit'}`}>
+                    {reconRun.discrepancyCount}
+                  </td>
+                </tr>
+                <tr>
+                  <td>Total balance</td>
+                  <td className="mono">{formatPaise(reconRun.totalBalancePaise)}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            {reconRun.discrepancies.length > 0 && (
+              <div>
+                <h3 className="section-title" style={{ marginTop: '16px', marginBottom: '8px' }}>Discrepancies</h3>
+                <table className="ledger-table">
+                  <thead>
+                    <tr>
+                      <th>Kind</th>
+                      <th>Ref</th>
+                      <th>Expected</th>
+                      <th>Actual</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconRun.discrepancies.map((d, idx) => (
+                      <tr key={idx}>
+                        <td className="mono text-debit">{d.kind}</td>
+                        <td className="mono">{formatShortId(d.ref)}</td>
+                        <td className="mono">{formatPaise(d.expectedPaise)}</td>
+                        <td className="mono">{formatPaise(d.actualPaise)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (accounts.length < 2) {
     return (
-      <div className="panel" style={{ maxWidth: '640px' }}>
-        <h1 className="panel-title">Lab: Concurrency Check</h1>
-        <p style={{ marginBottom: '16px' }}>
-          You need at least two accounts in the directory to run the Lab concurrency tests.
-        </p>
-        <Link to="/accounts/new" className="btn btn-primary">
-          Create or add accounts
-        </Link>
+      <div style={{ maxWidth: '800px' }}>
+        {renderLedgerHealthPanel()}
+        <div className="panel">
+          <h1 className="panel-title">Lab: Concurrency Check</h1>
+          <p style={{ marginBottom: '16px' }}>
+            You need at least two accounts in the directory to run the Lab concurrency tests.
+          </p>
+          <Link to="/accounts/new" className="btn btn-primary">
+            Create or add accounts
+          </Link>
+        </div>
       </div>
     );
   }
 
   return (
     <div style={{ maxWidth: '800px' }}>
+      {renderLedgerHealthPanel()}
       <div className="panel">
         <h1 className="panel-title">Lab: Concurrency Check</h1>
         <p className="text-ink-2" style={{ marginBottom: '24px' }}>

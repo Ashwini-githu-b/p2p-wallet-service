@@ -12,5 +12,10 @@ class OrderedLocksStrategyTest extends StrategyContractTest {
     boolean conflictsPossible() {
         return false;
     }
+
+    @Override
+    String strategyName() {
+        return "ORDERED_LOCKS";
+    }
 }
 

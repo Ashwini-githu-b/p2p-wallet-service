@@ -71,6 +71,10 @@
   background-color: var(--debit);
 }
 
+.status-dot.ink-2 {
+  background-color: var(--ink-2);
+}
+
 /* Page content */
 .main-wrapper {
   max-width: 1240px;

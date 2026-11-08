@@ -31,6 +31,11 @@ public class OrderedLocksStrategy extends AbstractTransferStrategy {
     }
 
     @Override
+    public String name() {
+        return "ORDERED_LOCKS";
+    }
+
+    @Override
     public OperationResult execute(MoneyMovement m) {
         // 1. Sort wallet IDs by UUID.compareTo; lock lower first then higher with findByIdForUpdate
         UUID firstId = m.fromWalletId().compareTo(m.toWalletId()) < 0 ? m.fromWalletId() : m.toWalletId();

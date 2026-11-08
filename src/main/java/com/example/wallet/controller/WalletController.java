@@ -11,6 +11,11 @@ import com.example.wallet.exception.InvalidIdempotencyKeyException;
 import com.example.wallet.exception.MissingIdempotencyKeyException;
 import com.example.wallet.service.TransferFacade;
 import com.example.wallet.service.WalletService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,6 +33,7 @@ import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/v1/wallets")
+@Tag(name = "Wallets", description = "Wallet balance lookup, top-up operations, and transaction history")
 public class WalletController {
 
     private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{8,64}$");
@@ -41,11 +47,21 @@ public class WalletController {
     }
 
     @GetMapping("/{userId}")
+    @Operation(summary = "Get wallet balance and details by user ID")
+    @ApiResponse(responseCode = "200", description = "Wallet retrieved successfully")
+    @ApiResponse(responseCode = "404", description = "USER_NOT_FOUND: User does not exist")
     public WalletResponse getWallet(@PathVariable UUID userId) {
         return walletService.getWallet(userId);
     }
 
     @PostMapping("/{userId}/topup")
+    @Operation(summary = "Top up wallet balance with double-entry ledger guarantee")
+    @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true, description = "Unique idempotency key matching ^[A-Za-z0-9_-]{8,64}$")
+    @ApiResponse(responseCode = "201", description = "Top-up applied successfully")
+    @ApiResponse(responseCode = "200", description = "Idempotent replay: previously committed top-up returned")
+    @ApiResponse(responseCode = "400", description = "VALIDATION_ERROR / INVALID_AMOUNT / MISSING_IDEMPOTENCY_KEY / INVALID_IDEMPOTENCY_KEY")
+    @ApiResponse(responseCode = "404", description = "USER_NOT_FOUND: User does not exist")
+    @ApiResponse(responseCode = "422", description = "IDEMPOTENCY_KEY_REUSED: Key was previously used with a different payload")
     public ResponseEntity<TransactionResponse> topUp(
             @PathVariable UUID userId,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
@@ -65,6 +81,9 @@ public class WalletController {
     }
 
     @GetMapping("/{userId}/transactions")
+    @Operation(summary = "Get paginated, chronological transaction ledger entries for a wallet")
+    @ApiResponse(responseCode = "200", description = "Ledger transactions retrieved successfully")
+    @ApiResponse(responseCode = "404", description = "USER_NOT_FOUND: User does not exist")
     public PageResponse<HistoryItem> getHistory(
             @PathVariable UUID userId,
             @RequestParam(defaultValue = "0") int page,
@@ -90,4 +109,3 @@ public class WalletController {
         return idempotencyKey;
     }
 }
-

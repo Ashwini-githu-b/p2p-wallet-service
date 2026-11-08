@@ -30,6 +30,11 @@ public class OptimisticStrategy extends AbstractTransferStrategy {
     }
 
     @Override
+    public String name() {
+        return "OPTIMISTIC";
+    }
+
+    @Override
     public OperationResult execute(MoneyMovement m) {
         // 1. Plain reads of both wallets with findById (no locks; the @Version values are captured)
         Wallet from = walletRepository.findById(m.fromWalletId())

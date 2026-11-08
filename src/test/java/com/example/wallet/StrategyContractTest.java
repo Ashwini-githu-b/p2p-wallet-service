@@ -45,7 +45,11 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
     @Autowired
     protected WalletProperties walletProperties;
 
+    @Autowired
+    protected com.example.wallet.metrics.WalletMetrics walletMetrics;
+
     abstract boolean conflictsPossible();
+    abstract String strategyName();
 
     // ==========================================
     // Concurrency & Invariants
@@ -70,6 +74,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
         }
 
         long initialRetries = transferFacade.getRetryCount();
+        double initialMetricRetries = walletMetrics.getRetryCount(strategyName());
 
         int totalTasks = 200;
         int threads = 32;
@@ -112,6 +117,9 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
             assertThat(transferFacade.getRetryCount() - initialRetries)
                     .as("Retry count must stay at 0 for non-optimistic strategies")
                     .isZero();
+            assertThat(walletMetrics.getRetryCount(strategyName()) - initialMetricRetries)
+                    .as("wallet_retries_total delta must be exactly 0 for non-optimistic strategies")
+                    .isZero();
         }
 
         assertThat(successfulTransfers).isGreaterThan(0);
@@ -142,6 +150,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
         CreateUserResponse userB = testSupport.createFundedUser(initialFunds);
 
         long initialRetries = transferFacade.getRetryCount();
+        double initialMetricRetries = walletMetrics.getRetryCount(strategyName());
 
         List<Callable<OperationResult>> tasks = new ArrayList<>();
         long transferAmount = 100L;
@@ -165,6 +174,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
                 assertThat(outcome.result()).isNotNull();
             }
             assertThat(transferFacade.getRetryCount() - initialRetries).isZero();
+            assertThat(walletMetrics.getRetryCount(strategyName()) - initialMetricRetries).isZero();
             assertThat(testSupport.balance(userA.userId())).isEqualTo(initialFunds);
             assertThat(testSupport.balance(userB.userId())).isEqualTo(initialFunds);
         } else {
@@ -203,6 +213,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
         }
 
         long initialRetries = transferFacade.getRetryCount();
+        double initialMetricRetries = walletMetrics.getRetryCount(strategyName());
 
         List<Callable<OperationResult>> tasks = new ArrayList<>();
         for (int i = 0; i < receiverCount; i++) {
@@ -226,6 +237,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
                 }
             }
             assertThat(transferFacade.getRetryCount() - initialRetries).isZero();
+            assertThat(walletMetrics.getRetryCount(strategyName()) - initialMetricRetries).isZero();
             assertThat(testSupport.balance(sender.userId())).isEqualTo(0L);
             assertThat(testSupport.sumBalances(receiverIds)).isEqualTo(1_000L);
         } else {
@@ -255,6 +267,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
         String key = testSupport.newKey();
 
         long initialRetries = transferFacade.getRetryCount();
+        double initialMetricRetries = walletMetrics.getRetryCount(strategyName());
 
         List<Callable<OperationResult>> tasks = new ArrayList<>();
         for (int i = 0; i < 20; i++) {
@@ -289,6 +302,7 @@ public abstract class StrategyContractTest extends AbstractIntegrationTest {
 
         if (!conflictsPossible()) {
             assertThat(transferFacade.getRetryCount() - initialRetries).isZero();
+            assertThat(walletMetrics.getRetryCount(strategyName()) - initialMetricRetries).isZero();
         }
     }
 

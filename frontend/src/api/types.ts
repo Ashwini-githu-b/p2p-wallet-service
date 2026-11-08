@@ -74,3 +74,22 @@ export interface RequestLogEntry {
   responseHeaders?: Record<string, string>;
 }
 
+export interface Discrepancy {
+  kind: string;
+  ref: string;
+  expectedPaise: number;
+  actualPaise: number;
+}
+
+export interface ReconciliationResponse {
+  runId: string;
+  startedAt: string;
+  finishedAt: string;
+  status: 'OK' | 'MISMATCH';
+  walletsChecked: number;
+  transactionsChecked: number;
+  discrepancyCount: number;
+  totalBalancePaise: number;
+  discrepancies: Discrepancy[];
+}
+
