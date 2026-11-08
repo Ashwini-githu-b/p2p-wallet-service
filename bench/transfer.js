@@ -84,7 +84,7 @@ export function setup() {
     userIds.push(user.userId);
 
     const topupKey = `bench-topup-${runId}-${i}`;
-    const topupRes = http.post(
+    const topupRes = postWithRetry(
       `${BASE_URL}/api/v1/wallets/${user.userId}/topup`,
       JSON.stringify({ amountPaise: 10000000 }),
       {
@@ -92,9 +92,14 @@ export function setup() {
           'Content-Type': 'application/json',
           'Idempotency-Key': topupKey,
         },
-      }
+      },
+      5,
+      2000
     );
     check(topupRes, { 'topup succeeded': (r) => r.status === 201 });
+    if (topupRes.status !== 201) {
+      throw new Error(`Failed to topup wallet for user ${user.userId}: HTTP ${topupRes.status} body=${topupRes.body}`);
+    }
   }
 
   return { runId, userIds, hotUser: userIds[0] };
