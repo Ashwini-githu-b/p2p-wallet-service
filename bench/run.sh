@@ -111,7 +111,7 @@ for strategy in "${STRATEGIES[@]}"; do
     run_k6 "$strategy" "$scenario"
 
     echo "Running post-scenario reconciliation..."
-    local recon_res
+    recon_res
     recon_res="$(curl -s -X POST "$BASE_URL/api/v1/admin/reconciliation/run" \
       -H "X-Admin-Token: $ADMIN_TOKEN" \
       -H "Content-Type: application/json")"
