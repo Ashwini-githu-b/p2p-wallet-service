@@ -1,0 +1,12 @@
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+node_modules/
+dist/
+frontend/dist/
+.env
+*.log
+bench/results/*.json

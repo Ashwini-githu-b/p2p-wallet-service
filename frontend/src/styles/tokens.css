@@ -1,0 +1,23 @@
+:root {
+  --paper: #F5F2EA;
+  --surface: #FBFAF6;
+  --ink: #1A1A17;
+  --ink-2: #55544D;
+  --rule: #D8D3C6;
+  --credit: #1E6B44;
+  --debit: #A2392B;
+  --focus: #1F4E8C;
+  --radius: 2px;
+
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+

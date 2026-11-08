@@ -1,0 +1,39 @@
+server:
+  port: ${PORT:8080}
+
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/wallet}
+    username: ${DB_USER:wallet}
+    password: ${DB_PASSWORD:wallet}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        order_updates: true
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+wallet:
+  max-amount-paise: 10000000   # Rs 1,00,000 per operation
+  admin-token: ${ADMIN_TOKEN:}
+  transfer:
+    strategy: ${WALLET_TRANSFER_STRATEGY:ORDERED_LOCKS}
+    retry:
+      max-retries: 10
+      base-backoff-ms: 2
+      max-backoff-ms: 50
+  reconciliation:
+    enabled: true
+    interval-ms: 300000
+    initial-delay-ms: 30000
