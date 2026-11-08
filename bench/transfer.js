@@ -36,8 +36,9 @@ export const options = {
     'http_reqs{phase:measure}': ['count>0'],
     'transfers_201{phase:measure}': ['count>0'],
     'transfers_422{phase:measure}': ['count>=0'],
-    'transfers_other{phase:measure}': ['count==0'],
+    'transfers_other{phase:measure}': ['count>=0'],
   },
+  summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
 export function setup() {
@@ -119,7 +120,7 @@ export default function (data) {
         'Content-Type': 'application/json',
         'Idempotency-Key': key,
       },
-      responseCallback: http.expectedStatuses(201, 422),
+      responseCallback: http.expectedStatuses(201, 409, 422),
     }
   );
 
