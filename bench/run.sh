@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# bench/run.sh — Wallet Service Benchmark Orchestrator
+#
+# k6 runs INSIDE the Docker Compose network (service: k6, profile: bench)
+# hitting http://app:8080 directly — no macOS port-forwarding NAT.
+# Health checks are also performed from inside the Docker network so the
+# "ready" signal comes from the same path k6 will use, not the host NAT.
+# Reconciliation curl calls go via localhost:8080 (host-side, infrequent).
+#
+# Usage:
+#   ./bench/run.sh                        # run full matrix, app stays up
+#   BENCH_RESET=1 ./bench/run.sh          # docker compose down -v first
+#   USERS=50 WARMUP=3s DURATION=10s ./bench/run.sh  # override params
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +21,11 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 mkdir -p "$RESULTS_DIR"
 
 ADMIN_TOKEN="${ADMIN_TOKEN:-local-admin-token}"
-BASE_URL="${BASE_URL:-http://localhost:8080}"
+# HOST-side base URL (for curl reconciliation calls only)
+HOST_BASE_URL="${HOST_BASE_URL:-http://localhost:8080}"
+# In-network base URL for k6 container
+K6_BASE_URL="http://app:8080"
+
 BENCH_RESET="${BENCH_RESET:-0}"
 USERS="${USERS:-200}"
 VUS="${VUS:-50}"
@@ -18,86 +35,87 @@ WARMUP="${WARMUP:-10s}"
 STRATEGIES=("ORDERED_LOCKS" "ATOMIC_UPDATE" "OPTIMISTIC")
 SCENARIOS=("uniform" "hot_wallet" "pingpong")
 
-wait_for_health() {
-  local max_wait=120
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+# Wait until the app is reachable FROM INSIDE the Docker network.
+# Uses a temporary k6 container (same image, same network) to wget the
+# health endpoint — this is the only reliable signal that k6 itself
+# will be able to reach the app.
+wait_for_health_in_network() {
+  local max_wait=180
   local elapsed=0
-  echo "Waiting for $BASE_URL/actuator/health to report UP..."
+  echo "  → Waiting up to ${max_wait}s for app:8080 to be reachable inside Docker network..."
   while [ $elapsed -lt $max_wait ]; do
-    if curl -fsS "$BASE_URL/actuator/health" 2>/dev/null | grep -q '"status":"UP"'; then
-      echo "Application is UP."
+    # One-shot wget inside the bench-profile network
+    local status
+    status="$(docker compose --profile bench run --rm --no-deps \
+      --entrypoint="" \
+      -e "" \
+      k6 \
+      wget -qO- http://app:8080/actuator/health 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null \
+      || echo "")"
+    if [ "$status" = "UP" ]; then
+      echo "  → App is UP and reachable inside Docker network (after ${elapsed}s)."
       return 0
     fi
-    sleep 2
-    elapsed=$((elapsed + 2))
+    sleep 3
+    elapsed=$((elapsed + 3))
   done
-  echo "ERROR: Application failed to become UP within ${max_wait}s." >&2
+  echo "ERROR: App did not become reachable inside Docker network within ${max_wait}s." >&2
+  docker compose logs app --tail=20 >&2
   exit 1
 }
 
-run_k6() {
+run_k6_in_network() {
   local strategy="$1"
   local scenario="$2"
-  local summary_file="$RESULTS_DIR/${strategy}-${scenario}.json"
+  local summary_file="/bench/results/${strategy}-${scenario}.json"
+  local host_summary="$RESULTS_DIR/${strategy}-${scenario}.json"
 
-  echo "Starting k6 for Strategy=${strategy}, Scenario=${scenario}..."
-  if command -v k6 &> /dev/null; then
-    SCENARIO="$scenario" \
-    BASE_URL="$BASE_URL" \
-    USERS="$USERS" \
-    VUS="$VUS" \
-    DURATION="$DURATION" \
-    WARMUP="$WARMUP" \
+  echo "  → Running k6 (in Docker network) for Strategy=${strategy}, Scenario=${scenario}..."
+
+  local k6_exit=0
+  docker compose \
+    --profile bench \
+    run --rm \
+    -e SCENARIO="$scenario" \
+    -e BASE_URL="$K6_BASE_URL" \
+    -e USERS="$USERS" \
+    -e VUS="$VUS" \
+    -e DURATION="$DURATION" \
+    -e WARMUP="$WARMUP" \
     k6 run \
       --summary-export "$summary_file" \
       --summary-trend-stats "avg,med,p(90),p(95),p(99),max" \
-      "$SCRIPT_DIR/transfer.js" || {
-        echo "ERROR: k6 exited with non-zero exit code for ${strategy} / ${scenario}." >&2
-        exit 1
-      }
-  else
-    local app_container
-    app_container="$(docker compose ps -q app 2>/dev/null || true)"
-    if [ -n "$app_container" ]; then
-      docker run --rm -i \
-        --network="container:${app_container}" \
-        -v "$ROOT_DIR:/work" \
-        -w /work \
-        -e SCENARIO="$scenario" \
-        -e BASE_URL="http://localhost:8080" \
-        -e USERS="$USERS" \
-        -e VUS="$VUS" \
-        -e DURATION="$DURATION" \
-        -e WARMUP="$WARMUP" \
-        grafana/k6 run \
-          --summary-export "$summary_file" \
-          --summary-trend-stats "avg,med,p(90),p(95),p(99),max" \
-          bench/transfer.js || {
-            echo "ERROR: dockerized k6 exited with non-zero exit code for ${strategy} / ${scenario}." >&2
-            exit 1
-          }
-    else
-      echo "ERROR: Neither local k6 nor running app container found." >&2
-      exit 1
-    fi
-  fi
+      /bench/transfer.js || k6_exit=$?
 
-  # Verify measure phase recorded requests > 0
-  local req_count
-  req_count="$(python3 -c "
-import json, sys
-data = json.load(open('$summary_file'))
-metrics = data.get('metrics', {})
-c = metrics.get('http_reqs{phase:measure}', {}).get('count')
-if c is None:
-    c = metrics.get('http_reqs', {}).get('count', 0)
-print(int(c))
-" 2>/dev/null || echo "0")"
-
-  if [ "$req_count" -le 0 ]; then
-    echo "ERROR: Measure phase recorded 0 requests for ${strategy} / ${scenario}." >&2
+  if [ $k6_exit -ne 0 ]; then
+    echo "ERROR: k6 exited with code $k6_exit for ${strategy} / ${scenario}." >&2
     exit 1
   fi
-  echo "k6 run successful: ${req_count} requests recorded in measure phase."
+
+  # Verify measure-phase request count > 0
+  local req_count
+  req_count="$(python3 - "$host_summary" <<'EOF'
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+    metrics = data.get("metrics", {})
+    tagged = metrics.get("http_reqs{phase:measure}", {})
+    c = tagged.get("count", metrics.get("http_reqs", {}).get("count", 0))
+    print(int(c))
+except Exception:
+    print(0)
+EOF
+)"
+
+  if [ "${req_count:-0}" -le 0 ]; then
+    echo "ERROR: Measure phase has 0 requests for ${strategy} / ${scenario}." >&2
+    exit 1
+  fi
+  echo "  → k6 OK: ${req_count} measure-phase requests recorded."
 }
 
 run_reconciliation() {
@@ -105,56 +123,69 @@ run_reconciliation() {
   local scenario="$2"
   local recon_file="$RESULTS_DIR/${strategy}-${scenario}-recon.json"
 
-  echo "Running post-scenario reconciliation audit..."
+  echo "  → Running reconciliation audit (host → localhost:8080)..."
   local recon_res
-  if ! recon_res="$(curl -fsS -X POST "$BASE_URL/api/v1/admin/reconciliation/run" \
-    -H "X-Admin-Token: $ADMIN_TOKEN" \
-    -H "Content-Type: application/json")"; then
-    echo "ERROR: Reconciliation HTTP request failed (non-200 status code) for ${strategy} / ${scenario}." >&2
+  if ! recon_res="$(curl -fsS --max-time 90 \
+        -X POST "${HOST_BASE_URL}/api/v1/admin/reconciliation/run" \
+        -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+        -H "Content-Type: application/json")"; then
+    echo "ERROR: Reconciliation HTTP request failed (non-2xx) for ${strategy} / ${scenario}." >&2
     exit 1
   fi
 
   echo "$recon_res" > "$recon_file"
 
-  local recon_status
-  recon_status="$(python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('status', ''))" <<< "$recon_res")"
-
-  local disc_count
-  disc_count="$(python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('discrepancyCount', -1))" <<< "$recon_res")"
+  local recon_status disc_count
+  recon_status="$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" <<< "$recon_res")"
+  disc_count="$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('discrepancyCount',-1))" <<< "$recon_res")"
 
   if [ "$recon_status" != "OK" ] || [ "$disc_count" -ne 0 ]; then
-    echo "CORRECTNESS FAILURE: Reconciliation status='${recon_status}', discrepancyCount=${disc_count} for ${strategy} / ${scenario}." >&2
+    echo "CORRECTNESS FAILURE: recon status='${recon_status}', discrepancyCount=${disc_count} for ${strategy}/${scenario}." >&2
     echo "$recon_res" >&2
     exit 1
   fi
-  echo "Reconciliation PASSED: status=OK, discrepancies=0."
+  echo "  → Reconciliation PASSED: status=OK, discrepancies=0."
 }
+
+# ── Main ───────────────────────────────────────────────────────────────────
 
 cd "$ROOT_DIR"
 
 if [ "$BENCH_RESET" = "1" ]; then
-  echo "Resetting docker-compose environment (BENCH_RESET=1)..."
-  rm -f "$RESULTS_DIR"/*.json "$RESULTS_DIR"/RESULTS.md
-  docker compose down -v
+  echo "=== BENCH_RESET=1: clearing previous results and resetting Docker stack ==="
+  rm -f "$RESULTS_DIR"/*.json "$RESULTS_DIR/RESULTS.md"
+  docker compose --profile observability --profile bench down -v 2>/dev/null || \
+    docker compose down -v 2>/dev/null || true
 fi
 
 for strategy in "${STRATEGIES[@]}"; do
+  echo ""
   echo "=========================================================="
-  echo "Switching transfer strategy to: $strategy"
+  echo " Strategy: $strategy"
   echo "=========================================================="
-  WALLET_TRANSFER_STRATEGY="$strategy" ADMIN_TOKEN="$ADMIN_TOKEN" docker compose up -d --force-recreate app
-  wait_for_health
+
+  # Stop the app container (if running), then start it with the new strategy env.
+  # Using 'stop + up' rather than '--force-recreate' so the volume and network
+  # are preserved across strategy switches (only the env var changes).
+  docker compose stop app 2>/dev/null || true
+  WALLET_TRANSFER_STRATEGY="$strategy" ADMIN_TOKEN="$ADMIN_TOKEN" \
+    docker compose up -d app
+
+  # Health check FROM INSIDE the Docker network — the same path k6 will use.
+  wait_for_health_in_network
 
   for scenario in "${SCENARIOS[@]}"; do
-    echo "----------------------------------------------------------"
-    echo "Running benchmark: Strategy=$strategy, Scenario=$scenario"
-    echo "----------------------------------------------------------"
+    echo ""
+    echo "  ----------------------------------------------------------"
+    echo "  Benchmark: Strategy=${strategy}, Scenario=${scenario}"
+    echo "  ----------------------------------------------------------"
 
-    run_k6 "$strategy" "$scenario"
+    run_k6_in_network "$strategy" "$scenario"
     run_reconciliation "$strategy" "$scenario"
   done
 done
 
-echo "Generating summary table..."
+echo ""
+echo "=== Generating summary table ==="
 python3 "$SCRIPT_DIR/summarize.py"
-echo "Benchmark completed successfully! Results written to $RESULTS_DIR/RESULTS.md"
+echo "=== Benchmark complete! Results written to $RESULTS_DIR/RESULTS.md ==="

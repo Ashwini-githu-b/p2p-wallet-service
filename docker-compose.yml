@@ -29,6 +29,24 @@ services:
     ports: ["3000:80"]
     depends_on:
       - app
+  k6:
+    image: grafana/k6:latest
+    profiles: ["bench"]
+    volumes:
+      - ./bench:/bench:ro
+      - ./bench/results:/bench/results:rw
+    working_dir: /bench
+    environment:
+      BASE_URL: http://app:8080
+      SCENARIO: ${SCENARIO:-uniform}
+      USERS: ${USERS:-200}
+      VUS: ${VUS:-50}
+      DURATION: ${DURATION:-30s}
+      WARMUP: ${WARMUP:-10s}
+    depends_on:
+      - app
+    # entrypoint is overridden per-run via `docker compose run`
+    entrypoint: ["k6"]
   prometheus:
     image: prom/prometheus:v2.54.1
     profiles: ["observability"]

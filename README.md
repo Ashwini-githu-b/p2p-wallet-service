@@ -1,313 +1,275 @@
 # P2P Wallet Service
 
+![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)
+
+> **Live Demo**: `https://<your-render-url>`  
+> *(Note: Free tier instances spin down after inactivity and may cold-start on the first request).*
+
+<!-- TODO: add demo GIF of the Lab page -->
+
 A high-performance, concurrency-safe Peer-to-Peer (P2P) digital wallet service built with Spring Boot 3.3.5, Java 21, and PostgreSQL 16.
 
 ---
 
 ## 1. Overview
 
-The **P2P Wallet Service** provides an audit-compliant, robust balance and ledger management engine supporting user creation, wallet top-ups, peer-to-peer money transfers, and paginated audit transaction histories.
+The **P2P Wallet Service** provides an audit-compliant, robust balance and ledger management engine supporting user onboarding, wallet top-ups, peer-to-peer money transfers, background continuous reconciliation, multiple interchangeable concurrency control strategies, and a utilitarian operator console.
 
-### Key Features
-- **User & Wallet Creation**: Creates a user profile with an associated digital wallet initialized to 0 paise balance.
-- **Balance Lookup**: Fast, non-locking read of current wallet balances.
-- **Wallet Top-Up**: Idempotent balance loading directly into user wallets.
-- **P2P Transfers**: Atomic money movement between accounts with ordered pessimistic row locking.
-- **Transaction History**: Paginated, chronological ledger and transaction history (newest-first) detailing transfer counterparties and point-in-time balance snapshots.
-
-### Tech Stack
-- **Language**: Java 21
-- **Framework**: Spring Boot 3.3.5 (Web, Spring Data JPA, Validation, Actuator)
-- **Database**: PostgreSQL 16 (default `READ COMMITTED` isolation)
-- **Schema Migrations**: Flyway
-- **Testing**: JUnit 5, AssertJ, Spring Boot Test, Testcontainers (PostgreSQL 16)
-- **Containerization**: Docker (multi-stage build), Docker Compose
-
-### Core Guarantees
-- **Conservation of Money**: Money is neither created nor destroyed during transfers. The total funds across all wallets remain invariant under high concurrent load.
-- **Non-Negative Balances**: Balances cannot drop below zero, even under heavy concurrent overdraft attempts.
-- **Deadlock-Free Execution**: Global ordering of row locks eliminates lock cycles, ensuring concurrent opposing transfers (A &rarr; B and B &rarr; A) execute without deadlocks.
-- **Strict Idempotency**: Every mutating operation requires an `Idempotency-Key`. Concurrent or sequential replays with the same key execute logic exactly once, returning the original response without double-spending.
+### Key Capabilities
+- **Strict Double-Entry Bookkeeping**: Every money movement creates balanced debit and credit entries. The global sum of all wallet balances always equals zero.
+- **Interchangeable Concurrency Strategies**: Switch dynamically between `ORDERED_LOCKS`, `ATOMIC_UPDATE`, and `OPTIMISTIC` transfer strategies without code changes.
+- **Continuous Ledger Reconciliation**: Background repeatable-read snapshot audits verifying zero-sum invariance, transaction shapes, and ledger-to-balance consistency with zero false positives.
+- **Production Observability**: Full Micrometer instrumentation exposing Prometheus metrics and a provisioned Grafana monitoring dashboard.
+- **Operator Web Console**: Internal banking-style ledger console with a live Concurrency Lab (`/lab`) for stress-testing money conservation.
+- **OpenAPI & Swagger Documentation**: Complete API specification available at `/swagger-ui.html` and `/v3/api-docs`.
 
 ---
 
-## 2. Architecture
+## 2. Core Guarantees & Ledger Design
 
-```mermaid
-flowchart TD
-    Client["HTTP Client / Mobile App"] -->|"HTTP /api/v1/..."| Controller["Controllers (UserController, WalletController, TransferController)"]
-    Controller -->|"TransferCommand / TopUpCommand"| TransferFacade["TransferFacade (Non-Transactional)"]
-    Controller -->|"Read / Create Requests"| UserService["UserService / WalletService"]
-    TransferFacade -->|"transfer() / topUp()"| TransferService["TransferService (@Transactional)"]
-    TransferFacade -.->|"replayIfExists() on DataIntegrityViolation"| TransferService
-    TransferService --> Repositories["Spring Data Repositories"]
-    UserService --> Repositories
-    WalletService --> Repositories
-    Repositories -->|"Pessimistic Row Locks & SQL"| DB[("PostgreSQL 16 (READ COMMITTED)")]
-```
+### System Account & Global Zero-Sum Invariant
+All top-ups are modeled as real two-sided transfers originated from a reserved **system wallet** (`00000000-0000-0000-0000-000000000002`) owned by a reserved **system user** (`00000000-0000-0000-0000-000000000001`).
+- The system account is completely hidden from the public API; requesting its user or wallet returns `404 USER_NOT_FOUND`.
+- The system wallet balance is negative, exactly matching minus the total funds in circulation across all user wallets.
+- **Global Invariant**: The sum of balances across **all** wallets (including the system wallet) is strictly zero:
+  $$\sum_{w \in \text{Wallets}} \text{balance}(w) = 0$$
 
-### Layering Rules
-- **Non-Transactional Web & Facade**: Controllers and `TransferFacade` are strictly non-transactional (`spring.jpa.open-in-view=false`).
-- **Facade Responsibilities**: `TransferFacade` coordinates calls to `TransferService` and gracefully catches unique constraint violations (`uq_wallet_transactions_idempotency_key`), fetching the committed winner's result via `replayIfExists(...)`.
-- **Service Transaction Boundary**: `TransferService` owns the database transaction (`@Transactional`), enforcing row lock ordering, funds checks, balance mutations, and ledger entries within a single atomic commit.
+### Balanced Double-Entry Records
+- **Top-Up**: 1 DEBIT row on the system wallet + 1 CREDIT row on the user's wallet. (In public responses and history, the user-facing counterparty remains `null`).
+- **Transfer**: 1 DEBIT row on the sender wallet + 1 CREDIT row on the recipient wallet.
+- **Balance Audit Invariant**: At all times, any individual wallet's balance exactly matches its ledger credit sum minus its debit sum:
+  $$\text{balance}(w) = \sum \text{CREDIT}(w) - \sum \text{DEBIT}(w)$$
+
+### Why Failed Operations Are Not Stored
+Operations that abort (such as insufficient funds, validation errors, or lock timeouts) trigger an immediate database transaction rollback. Only successfully committed operations generate transaction rows and ledger entries. This avoids phantom ledger bloat, ensures the ledger remains an immutable historical record of genuine money movements, and leaves idempotency keys unconsumed for safe client retries.
 
 ---
 
-## 3. Database Schema
+## 3. Concurrency Control Strategies
 
-The database follows double-entry bookkeeping principles. Every transfer generates a transaction row and two ledger entries (DEBIT sender, CREDIT receiver). Top-ups generate a transaction row and one credit ledger entry.
+The application provides three pluggable money movement implementations via the configuration property `wallet.transfer.strategy` (environment variable `WALLET_TRANSFER_STRATEGY`):
 
-```mermaid
-erDiagram
-    users ||--|| wallets : "owns"
-    wallets ||--o{ wallet_transactions : "from_wallet"
-    wallets ||--o{ wallet_transactions : "to_wallet"
-    wallet_transactions ||--|{ ledger_entries : "produces"
-    wallets ||--o{ ledger_entries : "recorded_on"
-
-    users {
-        UUID id PK
-        VARCHAR(100) name
-        VARCHAR(255) email UK
-        TIMESTAMPTZ created_at
-    }
-
-    wallets {
-        UUID id PK
-        UUID user_id FK, UK
-        BIGINT balance_paise
-        TIMESTAMPTZ created_at
-        TIMESTAMPTZ updated_at
-    }
-
-    wallet_transactions {
-        UUID id PK
-        VARCHAR(16) type
-        UUID from_wallet_id FK
-        UUID to_wallet_id FK
-        BIGINT amount_paise
-        VARCHAR(64) idempotency_key UK
-        TIMESTAMPTZ created_at
-    }
-
-    ledger_entries {
-        UUID id PK
-        UUID transaction_id FK
-        UUID wallet_id FK
-        VARCHAR(8) direction
-        BIGINT amount_paise
-        BIGINT balance_after_paise
-        UUID counterparty_wallet_id FK
-        TIMESTAMPTZ created_at
-    }
+```
++-----------------------------------------------------------------------------------+
+| Strategy           | Concurrency Mechanism       | Key Trade-Off                  |
++-----------------------------------------------------------------------------------+
+| ORDERED_LOCKS      | SELECT ... FOR UPDATE       | Default. Explicit, deadlock-   |
+|                    | (Canonical UUID order)      | free, easiest to reason about. |
++-----------------------------------------------------------------------------------+
+| ATOMIC_UPDATE      | Conditional SQL UPDATE with | Eliminates SELECT locks.       |
+|                    | RETURNING balance_paise     | Requires rollback-only trick.  |
++-----------------------------------------------------------------------------------+
+| OPTIMISTIC         | JPA @Version with jittered  | High throughput on disjoint    |
+|                    | exponential backoff retry   | keys; contention on hot rows.  |
++-----------------------------------------------------------------------------------+
 ```
 
-### Schema Guarantees
-- **Hibernate UUID Generation**: UUIDs are generated by Hibernate (`GenerationType.UUID`).
-- **Immutable Historical Records**: Only committed, successful operations persist rows in `wallet_transactions` and `ledger_entries`. Rejected operations roll back completely.
-- **Integrity Constraints**:
-  - `ck_wallets_balance_non_negative`: `CHECK (balance_paise >= 0)`
-  - `uq_wallet_transactions_idempotency_key`: `UNIQUE (idempotency_key)`
-  - `ck_wallet_transactions_shape`: Validates `TOPUP` has null sender and `TRANSFER` has distinct sender and recipient wallets.
-  - `ck_ledger_amount_positive` & `ck_ledger_balance_non_negative`.
+### 1. `ORDERED_LOCKS` (Default)
+- **Mechanism**: Sorts `fromWalletId` and `toWalletId` by `UUID.compareTo()`. Acquires pessimistic write locks (`SELECT ... FOR UPDATE`) in deterministic order, re-checks the idempotency key after locking, verifies sufficient balance, updates balances, and flushes ledger entries.
+- **Cost**: Holds row locks during transaction execution. Zero retries or deadlocks under concurrent opposing transfers.
+
+### 2. `ATOMIC_UPDATE`
+- **Mechanism**: Executes single-statement conditional SQL updates using `JdbcTemplate` without loading JPA entities:
+  ```sql
+  UPDATE wallets SET balance_paise = balance_paise - ?, updated_at = ?
+   WHERE id = ? AND (is_system OR balance_paise >= ?)
+  RETURNING balance_paise;
+  ```
+- **Order & Rollback-Only Replay Trick**: Statements are executed in sorted wallet-ID order. If the debit update returns no rows (insufficient funds), the strategy re-checks if a concurrent identical request just committed. If found, it marks `TransactionAspectSupport.currentTransactionStatus().setRollbackOnly()` so any credit already applied in this transaction is cleanly rolled back, then returns the idempotent replay.
+
+### 3. `OPTIMISTIC`
+- **Mechanism**: Reads wallets using plain `findById` without locks, capturing JPA `@Version` values. Balance changes and version increments are verified upon flush.
+- **Facade Retries**: Conflicts surface as `ObjectOptimisticLockingFailureException` or `CannotAcquireLockException`. `TransferFacade` retries up to `wallet.transfer.retry.max-retries` (default 10) with full-jitter exponential backoff before returning `409 CONCURRENT_UPDATE`. Note: The system wallet is a contention hotspot for top-ups under this strategy.
 
 ---
 
-## 4. Concurrency Design
+## 4. Ledger Reconciliation
 
-### The Problem
-When two debits on the same wallet execute concurrently (e.g. balance is 100 paise; Thread 1 debits 80, Thread 2 debits 50), both threads could read balance = 100 concurrently. Both pass validation and compute updated balances (20 and 50), resulting in a lost update and an illegal overdraft.
+### What It Checks
+A background auditor validates three mathematical invariants inside a single snapshot:
+1. **`WALLET_BALANCE_MISMATCH`**: Every wallet's `balance_paise` equals its ledger credit sum minus its debit sum.
+2. **`LEDGER_IMBALANCE`**: Every transaction has exactly 1 DEBIT and 1 CREDIT entry equal to the transaction amount.
+3. **`GLOBAL_SUM_NONZERO`**: The global balance sum across all wallets equals zero.
 
-### The Solution: Pessimistic Row Locking
-Inside a single database transaction under PostgreSQL default `READ COMMITTED` isolation, the service executes `SELECT ... FOR UPDATE` via `walletRepository.findByIdForUpdate(id)`. This blocks concurrent transactions attempting to read/lock the same wallet rows until the holder commits or rolls back.
+### Why REPEATABLE READ Snapshot Isolation
+The auditor runs with `@Transactional(isolation = Isolation.REPEATABLE_READ, readOnly = true)`. In `READ COMMITTED`, running audit queries while transfers are in flight would observe different moments in time, producing false-positive mismatch alerts. In `REPEATABLE READ`, all audit queries observe the exact same committed snapshot. The first statement `SELECT pg_try_advisory_xact_lock(7001)` prevents overlapping audit executions and fixes the snapshot.
 
-### Globally Ordered Lock Acquisition
-When transferring funds between two wallets, locking them in arbitrary order creates lock inversion deadlocks (e.g. Thread 1 locks A then waits for B; Thread 2 locks B then waits for A).
-
-To prevent deadlocks, `TransferService` determines lock ordering using UUID natural ordering:
-```java
-UUID firstId  = fromWalletId.compareTo(toWalletId) < 0 ? fromWalletId : toWalletId;
-UUID secondId = firstId.equals(fromWalletId) ? toWalletId : fromWalletId;
-
-Wallet first  = lockWallet(firstId);
-Wallet second = lockWallet(secondId);
-
-Wallet from = firstId.equals(fromWalletId) ? first : second;
-Wallet to   = (from == first) ? second : first;
-```
-Because every transaction in the system acquires wallet locks in the identical order, a lock cycle is mathematically impossible.
-
-### Why Pessimistic Over Optimistic Locking?
-Wallets are hot database rows. Optimistic locking (`@Version`) would cause high abort and retry rates under contention, wasting CPU and database bandwidth. Money movements should be deterministic and sequential without relying on blind retry loops.
-
-### Alternative Considered
-An atomic single-statement update such as:
-```sql
-UPDATE wallets SET balance = balance - :amt WHERE id = :id AND balance >= :amt;
-```
-While atomic, explicitly locking both rows allows point-in-time snapshotting of both source and destination balances for accurate double-entry ledger entries within the same transaction.
+### Verifying Invariants
+- **UI Indicator**: The TopBar polls `GET /api/v1/admin/reconciliation/latest` every 30s (`Ledger: balanced · checked 2m ago`).
+- **Lab Page**: The `/lab` page features a dedicated **Ledger health** panel displaying audit metrics and any discrepancy details.
+- **Admin Endpoint**:
+  ```bash
+  # Trigger manual synchronous audit
+  curl -i -X POST http://localhost:8080/api/v1/admin/reconciliation/run \
+    -H "X-Admin-Token: local-admin-token"
+  ```
+- **Tamper Proofs**: Automated integration tests in `ReconciliationTest` intentionally corrupt wallet balances (Tamper A) and ledger amounts (Tamper B) via direct SQL, asserting that reconciliation immediately flags `MISMATCH`, and then restores clean `OK` status once corrected.
 
 ---
 
-## 5. Idempotency
+## 5. Benchmarks
 
-Mutating endpoints (`POST /wallets/{userId}/topup`, `POST /transfers`) require an `Idempotency-Key` header matching `^[A-Za-z0-9_-]{8,64}$`.
+### Methodology
+The benchmark harness in `bench/` executes load tests using k6 against a containerized PostgreSQL instance across three workload profiles:
+- **`uniform`**: Senders and receivers chosen uniformly at random (50 VUs, 100–10,000 paise).
+- **`hot_wallet`**: Random senders transferring into a single receiver account (hot row write contention).
+- **`pingpong`**: Two accounts transferring ₹1.00 back and forth to test opposing lock cycles.
 
-### Idempotency Flow
-1. **Pre-Lock Fast Path**: Check if `idempotencyKey` already exists. If found, verify parameters match and immediately return the stored result with `200 OK` and header `Idempotent-Replay: true`.
-2. **Lock Acquisition**: Acquire row locks in globally consistent order.
-3. **Post-Lock Double-Check**: Re-query `findByIdempotencyKey` after acquiring locks. If another concurrent request with the same key raced and committed while this thread was blocked waiting for locks, the fresh snapshot in `READ COMMITTED` reveals the committed transaction, triggering an immediate idempotent replay.
-4. **Flush & Facade Fallback**: `saveAndFlush()` flushes the transaction record. If two concurrent requests with identical keys targeted different wallets, the database `uq_wallet_transactions_idempotency_key` unique constraint throws a `DataIntegrityViolationException`. `TransferFacade` catches this and safely fetches the committed winner's result.
-5. **Payload Mismatch**: If an idempotency key is reused with different parameters (amount, sender, or receiver), the system throws `IdempotencyKeyReusedException` (HTTP `422 IDEMPOTENCY_KEY_REUSED`).
+Immediately after each scenario run, `bench/run.sh` triggers an automated reconciliation audit and asserts `status: OK`.
+
+### How to Run
+```bash
+# Execute automated benchmark across all 3 strategies and 3 scenarios
+./bench/run.sh
+```
+
+### Benchmark Results (`bench/results/RESULTS.md`)
+
+```
+| Strategy | Scenario | Throughput (req/s) | p50 ms | p95 ms | p99 ms | 201 | 422 | other | Reconciliation |
+|---|---|---|---|---|---|---|---|---|---|
+| ORDERED_LOCKS | uniform | NOT RUN YET | - | - | - | - | - | - | - |
+| ORDERED_LOCKS | hot_wallet | NOT RUN YET | - | - | - | - | - | - | - |
+| ORDERED_LOCKS | pingpong | NOT RUN YET | - | - | - | - | - | - | - |
+| ATOMIC_UPDATE | uniform | NOT RUN YET | - | - | - | - | - | - | - |
+| ATOMIC_UPDATE | hot_wallet | NOT RUN YET | - | - | - | - | - | - | - |
+| ATOMIC_UPDATE | pingpong | NOT RUN YET | - | - | - | - | - | - | - |
+| OPTIMISTIC | uniform | NOT RUN YET | - | - | - | - | - | - | - |
+| OPTIMISTIC | hot_wallet | NOT RUN YET | - | - | - | - | - | - | - |
+| OPTIMISTIC | pingpong | NOT RUN YET | - | - | - | - | - | - | - |
+```
+
+> **Note**: Benchmark results are marked `NOT RUN YET` until executed in an active benchmark environment. Real numbers can be generated at any time by running `./bench/run.sh`.
 
 ---
 
-## 6. Ledger and Money Model
+## 6. Observability (Prometheus & Grafana)
 
-- **Paise as Long**: All monetary amounts are represented as 64-bit integer paise (`long`). Floating-point types (`float`, `double`, `BigDecimal`) are forbidden to eliminate rounding errors.
-- **Double-Entry Ledger**:
-  - `TRANSFER`: 1 DEBIT row on sender wallet + 1 CREDIT row on recipient wallet.
-  - `TOPUP`: 1 CREDIT row on recipient wallet (counterparty is null).
-- **Audit Invariant**: At any time, a wallet's current balance equals the sum of its credit ledger entries minus the sum of its debit ledger entries:
-  $$\text{balance} = \sum \text{CREDIT} - \sum \text{DEBIT}$$
-- **Atomic Rollback**: If funds are insufficient or any failure occurs, the transaction rolls back completely. No transaction records or ledger entries are written, and the idempotency key remains unconsumed.
+The service exposes production metrics via Spring Boot Actuator and Micrometer.
+
+### Starting the Observability Stack
+```bash
+docker compose --profile observability up -d
+```
+- **Prometheus**: `http://localhost:9090` (scrapes `http://app:8080/actuator/prometheus` every 5s)
+- **Grafana**: `http://localhost:3001` (Anonymous Viewer enabled, admin / admin)
+
+### Metric Dictionary
+- `wallet.operations` (Counter): Total facade operations tagged by `type` (`TRANSFER`/`TOPUP`) and `outcome` (`success`, `replayed`, `insufficient_funds`, `invalid`, `conflict_exhausted`, `error`).
+- `wallet.operation.duration` (Timer): Facade latency percentiles-histogram tagged by `type`, `strategy`, and `outcome`.
+- `wallet.retries` (Counter): Strategy conflict retries tagged by `strategy`.
+- `wallet.reconciliation.discrepancies` (Gauge): Number of discrepancies found in the latest audit run.
+- `wallet.reconciliation.last.run.timestamp` (Gauge): Unix epoch seconds of the latest audit run.
+- `hikaricp_connections_active` / `hikaricp_connections_pending`: Connection pool utilization.
+
+### Grafana Dashboard Panels
+1. **Throughput (transfers/s)**: Real-time successful transfer operations per second.
+2. **Latency (p50 / p95 / p99)**: Millisecond latency percentiles for transfers.
+3. **Outcomes**: Stacked rate of operation outcomes.
+4. **Retries/s**: Rate of concurrent update retries per second.
+5. **DB Pool**: Active vs pending HikariCP database connections.
+6. **Ledger Health**: Color-coded discrepancy counter (green = 0, red > 0) and seconds since last audit.
 
 ---
 
-## 7. API Reference
+## 7. Deployment & Configuration
 
-Base path: `/api/v1`
-
-| Method | Endpoint | Description | Status Codes |
-|---|---|---|---|
-| `POST` | `/api/v1/users` | Create user and initial wallet | `201`, `400`, `409` |
-| `GET` | `/api/v1/wallets/{userId}` | Get wallet balance | `200`, `400`, `404` |
-| `POST` | `/api/v1/wallets/{userId}/topup` | Top up wallet balance | `201`, `200` (replay), `400`, `404`, `422` |
-| `POST` | `/api/v1/transfers` | Transfer paise between users | `201`, `200` (replay), `400`, `404`, `422` |
-| `GET` | `/api/v1/wallets/{userId}/transactions` | Paginated transaction history | `200`, `400`, `404` |
-| `GET` | `/actuator/health` | Service health status | `200` |
-
-### cURL Examples
-
-#### 1. Create User
+### Single-Container Production Image (`Dockerfile.prod`)
+A multi-stage build packages the React frontend static assets directly into Spring Boot's `src/main/resources/static`, producing a self-contained image that serves the UI, API, and Swagger docs from a single port:
 ```bash
-curl -i -X POST http://localhost:8080/api/v1/users \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Asha", "email": "asha@example.com"}'
+docker build -f Dockerfile.prod -t wallet-service:prod .
+docker run -p 8080:8080 -e DB_URL=jdbc:postgresql://... wallet-service:prod
 ```
 
-#### 2. Top Up Wallet
-```bash
-curl -i -X POST http://localhost:8080/api/v1/wallets/<USER_ID>/topup \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: topup-key-00000001" \
-  -d '{"amountPaise": 500000}'
+### Render Blueprint (`render.yaml`)
+Deployable directly to Render using `render.yaml` with an external PostgreSQL provider (e.g. Neon):
+```yaml
+services:
+  - type: web
+    name: wallet-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile.prod
+    healthCheckPath: /actuator/health
 ```
 
-#### 3. Idempotent Replay of Top Up
-```bash
-curl -i -X POST http://localhost:8080/api/v1/wallets/<USER_ID>/topup \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: topup-key-00000001" \
-  -d '{"amountPaise": 500000}'
-```
-*Response Header contains `Idempotent-Replay: true` with status `200 OK`.*
-
-#### 4. Transfer Money
-```bash
-curl -i -X POST http://localhost:8080/api/v1/transfers \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: transfer-key-00000001" \
-  -d '{"fromUserId": "<SENDER_UUID>", "toUserId": "<RECEIVER_UUID>", "amountPaise": 25000}'
-```
-
-#### 5. Get Wallet Balance
-```bash
-curl -i -X GET http://localhost:8080/api/v1/wallets/<USER_ID>
-```
-
-#### 6. Get Transaction History
-```bash
-curl -i -X GET "http://localhost:8080/api/v1/wallets/<USER_ID>/transactions?page=0&size=20"
-```
-
----
-
-## 8. Running the Application
-
-### Using Docker Compose
-Run the application and PostgreSQL database with a single command:
-```bash
-docker compose up --build
-```
-Verify the service is running:
-```bash
-curl http://localhost:8080/actuator/health
-# {"status":"UP"}
-```
-
-### Running Tests
-Run the entire suite of integration and concurrency tests:
-```bash
-mvn test
-```
-*(Requires Docker to be running locally for Testcontainers).*
-
----
-
-## 9. Test Strategy
-
-| Test Suite | Scenario | What It Proves |
+### Environment Variables
+| Variable | Description | Default |
 |---|---|---|
-| `ConcurrentTransferTest` | `randomConcurrentTransfersConserveMoney` | 200 transfers across 32 concurrent threads on 10 users: proves conservation of money, non-negative balances, ledger-to-balance equality, and absence of deadlocks. |
-| `ConcurrentTransferTest` | `bidirectionalTransfersDoNotDeadlock` | 100 simultaneous bidirectional transfers (A&rarr;B and B&rarr;A): proves ordered locking prevents cycles. |
-| `ConcurrentTransferTest` | `overdraftRaceNeverGoesNegative` | 20 concurrent threads attempting to overdraw a wallet funded with only 10 transfers: exactly 10 succeed, 10 fail with `InsufficientFundsException`, ending at balance 0. |
-| `IdempotencyTest` | `sameKeyConcurrentReplayMovesMoneyOnce` | 20 concurrent threads submitting identical transfer requests: exactly 1 executes, 19 replay, money moves exactly once. |
-| `IdempotencyTest` | `sameKeyDifferentPayloadIsRejected` | Reusing a key with a different amount throws `IdempotencyKeyReusedException` without modifying balances. |
-| `IdempotencyTest` | `topUpIsIdempotent` | Concurrent duplicate top-ups increment balance exactly once. |
-| `TransferValidationTest` | Validation suite | Validates self-transfers, invalid amounts, non-existent users, and unconsumed idempotency keys after failed attempts. |
-| `HistoryTest` | Ledger ordering & pagination | Validates newest-first chronological ordering, balance snapshots, counterparties, and pagination boundaries. |
-| `ApiSmokeTest` | End-to-end HTTP suite | Validates full HTTP request/response lifecycles, JSON serialization, headers (`Idempotent-Replay`), and custom error codes. |
+| `PORT` | HTTP server port | `8080` |
+| `DB_URL` | JDBC database connection string | `jdbc:postgresql://localhost:5432/wallet` |
+| `DB_USER` | Database username | `wallet` |
+| `DB_PASSWORD` | Database password | `wallet` |
+| `DB_POOL_SIZE` | HikariCP maximum pool size | `20` |
+| `ADMIN_TOKEN` | Token required for admin reconciliation triggers | `""` (disabled) |
+| `WALLET_TRANSFER_STRATEGY` | Transfer concurrency strategy (`ORDERED_LOCKS`, `ATOMIC_UPDATE`, `OPTIMISTIC`) | `ORDERED_LOCKS` |
+
+*Neon connection string format: `jdbc:postgresql://<host>/<db>?sslmode=require`*
 
 ---
 
-## 10. Limitations and Future Work
+## 8. Web Console UI (`/frontend`)
 
-1. **Idempotency Key Scoping & TTL**: Current idempotency keys are table-wide unique. In production, scoping keys per user (`user_id + idempotency_key`) and implementing a TTL-based retention policy (e.g. 24-48 hours) would manage table growth.
-2. **Lock Timeouts**: Setting explicit lock acquisition timeouts (`SET lock_timeout = '2s'`) protects against long-running database hold-ups.
-3. **Transactional Outbox & Event Publishing**: Emitting domain events (`TransferCompleted`, `TopUpCompleted`) via a transactional outbox table for downstream asynchronous systems (Kafka, notifications).
-4. **Rate Limiting**: Defending public API endpoints against burst denial-of-service attempts via token bucket algorithms (e.g. Bucket4j or Redis).
-5. **Automated Reconciliation**: Scheduled background reconciliation jobs verifying ledger sums against current wallet balances across all accounts.
-6. **Authentication & Multi-Currency**: Adding OAuth2/JWT token verification, user authorization checks, and multi-currency exchange conversion rates.
+An operator console designed like an internal banking ledger book (warm paper, hairline borders, dense monospace figures):
+- **Directory**: Keeps local accounts in `localStorage`. Operators switch between accounts without authentication.
+- **TopBar**: Live API status, "API docs" Swagger link, and real-time ledger health status indicator.
+- **Quick Start (`/accounts/new`)**: One-click setup creating 3 demo accounts (Asha, Ravi, Meera) funded with ₹10,000 each.
+- **Ledger**: Paginated chronological history with point-in-time balance snapshots.
+- **Concurrency Lab (`/lab`)**: Live interactive testbed with an at-a-glance **Ledger health** panel and parallel batch transfer stress-testing.
 
----
-
-## 11. UI (Wallet Console)
-
-A utilitarian operator console for the wallet API, designed in the spirit of an internal banking ledger book.
-
-### Running the Web UI
-
-#### With Docker Compose:
-The web console is built into the compose stack and served on port 3000:
+To run locally in development:
 ```bash
+cd frontend && npm install && npm run dev
+# Serves UI at http://localhost:5173 with proxy to backend at http://localhost:8080
+```
+
+---
+
+## 9. API Reference & Swagger
+
+Interactive Swagger UI documentation is available at:
+👉 **`http://localhost:8080/swagger-ui.html`** (or via Web Console top bar "API docs")
+
+Raw OpenAPI v3 JSON spec: `http://localhost:8080/v3/api-docs`
+
+Base Path: `/api/v1`
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/users` | Onboard new user and wallet |
+| `GET` | `/api/v1/wallets/{userId}` | Read wallet balance |
+| `POST` | `/api/v1/wallets/{userId}/topup` | Top up wallet balance (Header: `Idempotency-Key`) |
+| `POST` | `/api/v1/transfers` | Transfer paise between users (Header: `Idempotency-Key`) |
+| `GET` | `/api/v1/wallets/{userId}/transactions` | Paginated transaction ledger history |
+| `GET` | `/api/v1/admin/reconciliation/latest` | Read latest reconciliation audit summary |
+| `POST` | `/api/v1/admin/reconciliation/run` | Trigger manual audit (Header: `X-Admin-Token`) |
+| `GET` | `/actuator/health` | Service health status |
+| `GET` | `/actuator/prometheus` | Prometheus metrics scrape endpoint |
+
+---
+
+## 10. Running the Complete Stack
+
+```bash
+# Start Postgres, Spring Boot backend, and Nginx frontend console
 docker compose up --build
+
+# Open the Web Console
+open http://localhost:3000
+
+# Open Swagger API documentation
+open http://localhost:8080/swagger-ui.html
+
+# Open Prometheus & Grafana (observability profile)
+docker compose --profile observability up -d
+open http://localhost:3001
 ```
-Open **http://localhost:3000** in your browser.
 
-#### Local Development:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-The Vite development server runs on `http://localhost:5173` and proxies `/api` and `/actuator` requests to `http://localhost:8080`.
+---
 
-### Features
-- **Account Directory**: Local directory in `localStorage` allowing operators to switch between accounts without credentials.
-- **Transfers & Top-Ups**: Send funds and add money with integer paise parsing, live amount validation, and visible `Idempotency-Key` lifecycle handling with safe retry on network failures.
-- **Double-Entry Ledger**: Paginated, chronological transaction ledger with counterparty names, direction markers (`+` credit / `−` debit), and balance after snapshot.
-- **Request Dock**: Collapsible bottom dock logging all API requests with timing, payloads, headers, and an interactive "Replay" action.
-- **Concurrency Lab (`/lab`)**: Live interactive testbed demonstrating concurrent transfer execution, conservation of money invariance, and same-key deduplication.
+## 11. Known Limitations & Future Work
 
-
+1. **System-Wallet Hot Row on Top-Ups**: Top-ups debit the single system wallet. Under heavy top-up concurrency (especially with `OPTIMISTIC`), this creates a write contention hotspot. In production, sharding the system account into $N$ internal debit accounts (`system-1`, `system-2`) would distribute write locks.
+2. **Full-Scan Reconciliation**: Current audits perform full table scans on `wallets` and `wallet_transactions`. For multi-million row tables, windowed or incremental reconciliation (auditing time slices or recently updated accounts) is recommended.
+3. **Global Idempotency Keys**: Keys are currently unique across the entire database. Production systems should scope idempotency keys per user (`user_id + idempotency_key`) with a TTL expiry (e.g. 24–48 hours) to prevent unbounded index growth.
+4. **Offset Pagination**: Transaction history uses offset-based pagination (`page` and `size`). Under high insert rates, keyset pagination (cursor-based on `created_at, id`) avoids page drifting.
+5. **Authentication**: The service operates as an internal ledger engine without caller authentication. Production deployment requires JWT / OAuth2 bearer token authorization and role-based access control (RBAC).

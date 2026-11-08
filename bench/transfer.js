@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter } from 'k6/metrics';
 import exec from 'k6/execution';
 
@@ -41,20 +41,45 @@ export const options = {
   summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
+// Retry a request up to maxRetries times with delayMs between attempts.
+// Returns the last response (or throws if all retries fail with a non-HTTP error).
+function postWithRetry(url, body, params, maxRetries, delayMs) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = http.post(url, body, params);
+    // A real HTTP response (even 4xx/5xx) is a success at the transport layer
+    if (res.status > 0) {
+      return res;
+    }
+    // status === 0 means a network error (connection refused, reset, etc.)
+    if (attempt < maxRetries) {
+      sleep(delayMs / 1000);
+    }
+  }
+  // Return the last failed response so the caller can inspect it
+  return http.post(url, body, params);
+}
+
 export function setup() {
   const runId = Math.random().toString(36).substring(2, 10);
   const userIds = [];
 
   for (let i = 0; i < USERS; i++) {
-    const userRes = http.post(
+    // Retry up to 5 times with 2s delay to tolerate transient startup
+    // connection errors when the app container has just restarted.
+    const userRes = postWithRetry(
       `${BASE_URL}/api/v1/users`,
       JSON.stringify({
         name: `bench-${runId}-${i}`,
         email: `bench-${runId}-${i}@example.com`,
       }),
-      { headers: { 'Content-Type': 'application/json' } }
+      { headers: { 'Content-Type': 'application/json' } },
+      5,
+      2000
     );
     check(userRes, { 'user created': (r) => r.status === 201 });
+    if (userRes.status !== 201) {
+      throw new Error(`Failed to create user ${i}: HTTP ${userRes.status} body=${userRes.body}`);
+    }
     const user = JSON.parse(userRes.body);
     userIds.push(user.userId);
 
